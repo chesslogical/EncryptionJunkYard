@@ -1,0 +1,16 @@
+[package]
+name = "xcha"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "In-memory XChaCha20-Poly1305 encrypt/decrypt files (atomic, in-place)"
+authors = ["Mark"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rpassword = "7.4"
+chacha20poly1305 = "0.10.1"          # stable version
+rand = { version = "0.8", features = ["getrandom"] }
+tempfile = "3.26"
+argon2 = "0.5.3"

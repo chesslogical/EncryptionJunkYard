@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>xcha – Simple XChaCha20-Poly1305 file encrypt/decrypt</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      color: #222;
+      background: #f9f9f9;
+    }
+    h1, h2, h3 {
+      color: #111;
+    }
+    h1 {
+      border-bottom: 2px solid #ddd;
+      padding-bottom: 0.5rem;
+    }
+    code {
+      font-family: 'Consolas', 'Courier New', monospace;
+      background: #f4f4f4;
+      padding: 0.2em 0.4em;
+      border-radius: 3px;
+    }
+    pre {
+      background: #f4f4f4;
+      padding: 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+    }
+    .command {
+      background: #e8f0fe;
+      padding: 0.8rem 1.2rem;
+      border-left: 4px solid #4285f4;
+      margin: 1rem 0;
+    }
+    .warning {
+      background: #fff3cd;
+      color: #856404;
+      padding: 1rem;
+      border-left: 4px solid #ffeeba;
+      margin: 1.5rem 0;
+      border-radius: 4px;
+    }
+    ul, ol {
+      padding-left: 1.8rem;
+    }
+    table {
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 0.6rem 1rem;
+      text-align: left;
+    }
+    th {
+      background: #f0f0f0;
+    }
+    footer {
+      margin-top: 3rem;
+      text-align: center;
+      color: #777;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+<h1>xcha</h1>
+<p><strong>Fast in-memory XChaCha20-Poly1305 file encryption/decryption</strong><br>
+Small CLI tool that encrypts or decrypts files in place using a fixed 32-byte key file (<code>key.key</code>).</p>
+
+<h2>Features</h2>
+<ul>
+  <li>Uses <strong>XChaCha20-Poly1305</strong> (256-bit key, 192-bit nonce)</li>
+  <li>Atomic in-place overwrite (via temporary file + rename)</li>
+  <li>Automatic encrypt/decrypt detection via magic header</li>
+  <li>Very fast – no password hashing / key derivation (fixed key)</li>
+  <li>32 GiB file size safety limit</li>
+  <li>Single-file binary (after <code>cargo build --release</code>)</li>
+</ul>
+
+<h2>Security warning</h2>
+<div class="warning">
+  <strong>This tool uses a static key file (<code>key.key</code>) stored next to the executable.</strong><br><br>
+  Anyone who gets access to both the program and <code>key.key</code> can decrypt all your files.<br>
+  Use only on trusted / encrypted devices (full-disk encryption recommended).<br>
+  Do <strong>not</strong> use for highly sensitive long-term secrets without additional protection.
+</div>
+
+<h2>Installation / Build</h2>
+
+<ol>
+  <li>Make sure you have <a href="https://www.rust-lang.org/tools/install">Rust</a> installed</li>
+  <li>Clone or download the project</li>
+  <li>Build release binary:
+<pre><code>cargo build --release</code></pre>
+  </li>
+  <li>The binary will be in <code>target/release/xcha.exe</code> (Windows) or <code>target/release/xcha</code> (Linux/macOS)</li>
+</ol>
+
+<h2>Usage</h2>
+
+<p>Place a 32-byte random key file named <code>key.key</code> in the same directory as the executable.</p>
+
+<div class="command">
+  <strong>Generate key (one time only):</strong><br>
+  <code>openssl rand -out key.key 32</code><br>
+  or (PowerShell):<br>
+  <code>$bytes = New-Object Byte[] 32; (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes); [IO.File]::WriteAllBytes("key.key", $bytes)</code>
+</div>
+
+<p>Basic usage – toggle encrypt/decrypt automatically:</p>
+<div class="command">
+  <code>xcha path/to/yourfile.txt</code>
+</div>
+
+<p>Force encryption (even if file already has magic header):</p>
+<div class="command">
+  <code>xcha --force-encrypt secret.pdf</code>
+</div>
+
+<p>Force decryption (even if no magic header):</p>
+<div class="command">
+  <code>xcha --force-decrypt document.docx</code>
+</div>
+
+<h2>File format</h2>
+
+<table>
+  <tr><th>Offset</th><th>Length</th><th>Content</th></tr>
+  <tr><td>0</td><td>14</td><td>Magic header: <code>XCHACHA_ENC_v1</code></td></tr>
+  <tr><td>14</td><td>24</td><td>Random XChaCha20 nonce</td></tr>
+  <tr><td>38</td><td>variable</td><td>XChaCha20-Poly1305 ciphertext + 16-byte authentication tag</td></tr>
+</table>
+
+<h2>Dependencies</h2>
+<ul>
+  <li><code>chacha20poly1305 = "0.10.1"</code></li>
+  <li><code>clap = { version = "4.5", features = ["derive"] }</code></li>
+  <li><code>rand = { version = "0.8", features = ["getrandom"] }</code></li>
+  <li><code>tempfile = "3.13"</code></li>
+</ul>
+
+<h2>License</h2>
+<p>MIT OR Apache-2.0 – same as most RustCrypto crates.</p>
+
+<footer>
+  Made with Rust • Last updated: March 2026
+</footer>
+
+</body>
+</html>
