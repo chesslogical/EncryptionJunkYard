@@ -1,0 +1,391 @@
+==================== FILE: Cargo.toml ====================
+[package]
+name = "cc"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal file encryption app using Lockbox's proven crypto"
+license = "MIT"
+
+[dependencies]
+argon2 = "0.5.3"
+chacha20poly1305 = "0.10.1"
+getrandom = "0.2"
+rpassword = "7.4.0"
+thiserror = "2.0.18"
+zeroize = { version = "1.8.2", features = ["derive"] }
+tempfile = "3.6"
+clap = { version = "4.6", features = ["derive"] }
+colored = "2.0"
+
+
+
+==================== FILE: src/cli.rs ====================
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(author, version, about = "Modern Lockbox 2024 Edition", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    /// Argon2 memory in KiB
+    #[arg(long, default_value_t = 65536)]
+    pub memory: u32,
+
+    /// Argon2 iterations
+    #[arg(long, default_value_t = 3)]
+    pub iterations: u32,
+
+    /// Argon2 parallelism
+    #[arg(long, default_value_t = 4)]
+    pub parallelism: u32,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    Encrypt { files: Vec<PathBuf>, force: bool },
+    Decrypt { files: Vec<PathBuf>, output: Option<PathBuf>, force: bool },
+}
+
+
+
+==================== FILE: src/constants.rs ====================
+//! Shared constants for encryption tool
+pub const MAGIC_BYTES: &[u8; 8] = b"LOCKBOX\x01";
+pub const FORMAT_VERSION: u8 = 1;
+pub const SALT_LEN: usize = 16;
+pub const NONCE_LEN: usize = 12;
+pub const KEY_LEN: usize = 32;
+pub const DEFAULT_BUFFER_SIZE: usize = 64 * 1024; // 64 KB
+
+
+
+==================== FILE: src/crypto.rs ====================
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    ChaCha20Poly1305, KeyInit, Nonce,
+};
+use argon2::{Argon2, Algorithm, Version, Params};
+use getrandom::getrandom;
+use zeroize::Zeroizing;
+
+use crate::constants::*;
+use crate::error::{LockboxError, Result};
+
+pub fn derive_key(
+    password: &[u8],
+    salt: &[u8],
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let params = Params::new(memory, iterations, parallelism, Some(KEY_LEN))
+        .map_err(|e| LockboxError::EncryptionFailed(format!("Argon2 params failed: {}", e)))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    argon2
+        .hash_password_into(password, salt, key.as_mut())
+        .map_err(|e| LockboxError::EncryptionFailed(format!("Key derivation failed: {}", e)))?;
+    Ok(key)
+}
+
+pub fn generate_salt() -> [u8; SALT_LEN] {
+    let mut salt = [0u8; SALT_LEN];
+    getrandom(&mut salt).expect("Failed to get random bytes");
+    salt
+}
+
+pub fn generate_nonce() -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom(&mut nonce).expect("Failed to get random bytes");
+    nonce
+}
+
+pub fn encrypt_bytes(
+    plaintext: &[u8],
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key)
+        .map_err(|e| LockboxError::EncryptionFailed(format!("Cipher init failed: {}", e)))?;
+    cipher
+        .encrypt(Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .map_err(|e| LockboxError::EncryptionFailed(format!("Encryption failed: {}", e)))
+}
+
+pub fn decrypt_bytes(
+    ciphertext: &[u8],
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| LockboxError::DecryptionFailed)?;
+    cipher
+        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .map_err(|_| LockboxError::DecryptionFailed)
+}
+
+
+
+==================== FILE: src/error.rs ====================
+use thiserror::Error;
+use std::io;
+
+#[derive(Error, Debug)]
+pub enum LockboxError {
+    #[error("Encryption failed: {0}")]
+    EncryptionFailed(String),
+
+    #[error("Decryption failed: incorrect password or file tampered with")]
+    DecryptionFailed,
+
+    #[error("Invalid file format")]
+    InvalidFileFormat,
+
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Passwords do not match")]
+    PasswordMismatch,
+
+    #[error("Password cannot be empty")]
+    EmptyPassword,
+
+    #[error("Operation cancelled by user")]
+    Cancelled,
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, LockboxError>;
+
+
+
+==================== FILE: src/file_ops.rs ====================
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+use zeroize::Zeroizing;
+
+use crate::constants::*;
+use crate::crypto::{derive_key, generate_nonce, generate_salt, encrypt_bytes, decrypt_bytes};
+use crate::error::{LockboxError, Result};
+
+pub fn encrypt_file(
+    path: &Path,
+    password: &[u8],
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    force: bool,
+) -> Result<PathBuf> {
+    if path.extension().unwrap_or_default() == "lb" && !force {
+        return Err(LockboxError::EncryptionFailed("Already encrypted".into()));
+    }
+
+    let filename = path.file_name()
+        .ok_or_else(|| LockboxError::EncryptionFailed("Invalid filename".into()))?
+        .to_string_lossy()
+        .to_string();
+
+    let salt = generate_salt();
+    let nonce = generate_nonce();
+    let key = derive_key(password, &salt, memory, iterations, parallelism)?;
+
+    let filename_bytes = filename.as_bytes();
+    if filename_bytes.len() > u16::MAX as usize {
+        return Err(LockboxError::EncryptionFailed("Filename too long".into()));
+    }
+    let filename_len = filename_bytes.len() as u16;
+
+    let mut header = Vec::new();
+    header.extend_from_slice(MAGIC_BYTES);
+    header.push(FORMAT_VERSION);
+    header.extend_from_slice(&filename_len.to_be_bytes());
+    header.extend_from_slice(filename_bytes);
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&nonce);
+
+    let out_path = path.with_extension("lb");
+    let tmp_file = NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
+    let mut writer = BufWriter::new(&tmp_file);
+
+    writer.write_all(&header)?;
+
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(DEFAULT_BUFFER_SIZE, file);
+    let mut buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
+
+    while let Ok(n) = reader.read(&mut buffer) {
+        if n == 0 { break; }
+        let ciphertext = encrypt_bytes(&buffer[..n], &key[..], &nonce, &header)?;
+        writer.write_all(&ciphertext)?;
+    }
+
+    writer.flush()?;
+    // Drop the writer so tmp_file is no longer borrowed
+    drop(writer);
+    tmp_file.persist(&out_path).map_err(|e| LockboxError::Io(e.error))?;
+    Ok(out_path)
+}
+
+pub fn decrypt_file_to_path(
+    path: &Path,
+    password: &[u8],
+    output: Option<&Path>,
+    memory: u32,
+    iterations: u32,
+    parallelism: u32,
+    _force: bool,
+) -> Result<PathBuf> {
+    if path.extension().unwrap_or_default() != "lb" {
+        return Err(LockboxError::DecryptionFailed);
+    }
+
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut header_buf = vec![0u8; 8 + 1 + 2 + 4096];
+    reader.read_exact(&mut header_buf[..11])?;
+    let filename_len = u16::from_be_bytes([header_buf[9], header_buf[10]]) as usize;
+    reader.read_exact(&mut header_buf[11..11 + filename_len + SALT_LEN + NONCE_LEN])?;
+
+    let filename_bytes = &header_buf[11..11 + filename_len];
+    let original_name = String::from_utf8_lossy(filename_bytes).to_string();
+
+    let salt_start = 11 + filename_len;
+    let nonce_start = salt_start + SALT_LEN;
+
+    let salt: [u8; SALT_LEN] = header_buf[salt_start..nonce_start].try_into().unwrap();
+    let nonce: [u8; NONCE_LEN] = header_buf[nonce_start..nonce_start + NONCE_LEN].try_into().unwrap();
+
+    let key = derive_key(password, &salt, memory, iterations, parallelism)?;
+    let header_len = 11 + filename_len + SALT_LEN + NONCE_LEN;
+    let full_header = &header_buf[..header_len];
+
+    let out_path = output.map_or_else(
+        || path.parent().unwrap_or(Path::new(".")).join(&original_name),
+        |p| p.to_path_buf()
+    );
+
+    let tmp_file = NamedTempFile::new_in(out_path.parent().unwrap_or(Path::new(".")))?;
+    let mut writer = BufWriter::new(&tmp_file);
+    let mut buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
+
+    while let Ok(n) = reader.read(&mut buffer) {
+        if n == 0 { break; }
+        let plaintext = decrypt_bytes(&buffer[..n], &key[..], &nonce, full_header)?;
+        writer.write_all(&plaintext)?;
+    }
+
+    writer.flush()?;
+    drop(writer); // Release borrow
+    tmp_file.persist(&out_path).map_err(|e| LockboxError::Io(e.error))?;
+    Ok(out_path)
+}
+
+
+
+==================== FILE: src/main.rs ====================
+mod cli;
+mod constants;   // ✅ Add this
+mod crypto;      // ✅ Add this
+mod file_ops;
+mod error;
+
+use clap::Parser;
+use colored::Colorize;
+use cli::{Cli, Commands};
+use file_ops::{decrypt_file_to_path, encrypt_file};
+use error::{LockboxError, Result};
+use rpassword::prompt_password;
+use zeroize::Zeroizing;
+
+fn prompt_password_with_confirm() -> Result<Zeroizing<String>> {
+    loop {
+        let password = Zeroizing::new(prompt_password("Enter password: ")?);
+        if password.is_empty() {
+            println!("{}", "Password cannot be empty".red());
+            continue;
+        }
+        let confirm_pw = Zeroizing::new(prompt_password("Confirm password: ")?);
+        if password != confirm_pw {
+            println!("{}", "Passwords do not match. Try again.".red());
+            continue;
+        }
+        return Ok(password);
+    }
+}
+
+fn prompt_password_decrypt() -> Result<Zeroizing<String>> {
+    let password = Zeroizing::new(prompt_password("Enter password: ")?);
+    if password.is_empty() {
+        return Err(LockboxError::EmptyPassword);
+    }
+    Ok(password)
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Encrypt { files, force } => {
+            println!("{}", "🔐 Lockbox Encryption".cyan().bold());
+            println!();
+
+            let password = prompt_password_with_confirm()?;
+            println!();
+
+            for file_path in &files {
+                match encrypt_file(
+                    file_path,
+                    password.as_bytes(),
+                    cli.memory,
+                    cli.iterations,
+                    cli.parallelism,
+                    force,
+                ) {
+                    Ok(output_path) => println!("{} → {:?}", "✓".green(), output_path),
+                    Err(e) => println!("{} {}", "✗".red(), e),
+                }
+            }
+        }
+        Commands::Decrypt { files, output, force } => {
+            println!("{}", "🔓 Lockbox Decryption".cyan().bold());
+            println!();
+
+            let password = prompt_password_decrypt()?;
+            println!();
+
+            for file_path in &files {
+                match decrypt_file_to_path(
+                    file_path,
+                    password.as_bytes(),
+                    output.as_deref(),
+                    cli.memory,
+                    cli.iterations,
+                    cli.parallelism,
+                    force,
+                ) {
+                    Ok(output_path) => println!("{} → {:?}", "✓".green(), output_path),
+                    Err(e) => println!("{} {}", "✗".red(), e),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{} {}", "Error".red().bold(), e);
+        std::process::exit(1);
+    }
+}
+
+
+

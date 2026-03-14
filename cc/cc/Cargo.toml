@@ -1,0 +1,14 @@
+[package]
+name = "cc"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal file encryption app using Lockbox's proven crypto"
+license = "MIT"  # Inherited from original Lockbox
+
+[dependencies]
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+rpassword = "7.3"
+thiserror = "1.0"
+zeroize = { version = "1.7", features = ["derive"] }

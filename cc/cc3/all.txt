@@ -1,0 +1,307 @@
+==================== FILE: Cargo.toml ====================
+[package]
+name = "aicrypt"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal Linux-only file encryption CLI"
+license = "MIT"
+
+[dependencies]
+argon2 = "0.5.3"
+chacha20poly1305 = "0.10.1"
+getrandom = "0.2"
+rpassword = "7.4.0"
+thiserror = "2.0.18"
+zeroize = { version = "1.8.2", features = ["derive"] }
+tempfile = "3.6"
+clap = { version = "4.6", features = ["derive"] }
+colored = "2.0"
+rand = "0.8"
+rand_chacha = "0.3"
+sha2 = "0.10"
+[lib]
+name = "aicrypt"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3.6"
+rand = "0.8"
+rand_chacha = "0.3"
+rayon = "1.7"
+
+
+
+==================== FILE: src/cli.rs ====================
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(author, version, about = "Modern Lockbox 2024 Edition", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    /// Argon2 memory in KiB
+    #[arg(long, default_value_t = 65536)]
+    pub memory: u32,
+
+    /// Argon2 iterations
+    #[arg(long, default_value_t = 3)]
+    pub iterations: u32,
+
+    /// Argon2 parallelism
+    #[arg(long, default_value_t = 4)]
+    pub parallelism: u32,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    Encrypt { files: Vec<PathBuf>, force: bool },
+    Decrypt { files: Vec<PathBuf>, output: Option<PathBuf>, force: bool },
+}
+
+
+
+==================== FILE: src/constants.rs ====================
+//! Shared constants for encryption tool
+
+pub const MAGIC_BYTES: &[u8; 8] = b"LOCKBOX\x01";
+pub const FORMAT_VERSION: u8 = 1;
+pub const SALT_LEN: usize = 16;
+pub const NONCE_LEN: usize = 12;
+pub const KEY_LEN: usize = 32;
+
+#[allow(dead_code)] // may not be used yet
+pub const DEFAULT_BUFFER_SIZE: usize = 64 * 1024; // 64 KB buffer for file operations
+
+
+
+==================== FILE: src/crypto.rs ====================
+use rand::RngCore;
+use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use argon2::{Argon2, PasswordHasher, SaltString};
+
+pub fn generate_salt() -> SaltString {
+    SaltString::generate(&mut rand::thread_rng())
+}
+
+pub fn derive_key(password: &str, salt: &SaltString) -> Key {
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), salt).unwrap();
+    let key_bytes = &hash.hash.unwrap().as_bytes()[..32];
+    Key::from_slice(key_bytes).clone()
+}
+
+pub fn generate_nonce() -> Nonce {
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    Nonce::from_slice(&nonce_bytes).clone()
+}
+
+pub fn encrypt_bytes(key: &Key, nonce: &Nonce, data: &[u8]) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new(key);
+    cipher.encrypt(nonce, data).expect("encryption failed")
+}
+
+pub fn decrypt_bytes(key: &Key, nonce: &Nonce, data: &[u8]) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new(key);
+    cipher.decrypt(nonce, data).expect("decryption failed")
+}
+
+
+
+==================== FILE: src/error.rs ====================
+// src/error.rs
+use thiserror::Error;
+use std::io;
+
+/// Lockbox errors
+#[derive(Error, Debug)]
+#[allow(dead_code)] // suppress warnings for variants not used yet
+pub enum LockboxError {
+    #[error("Encryption failed: {0}")]
+    EncryptionFailed(String),
+
+    #[error("Decryption failed: incorrect password or file tampered with")]
+    DecryptionFailed,
+
+    #[error("Invalid file format")]
+    InvalidFileFormat,
+
+    #[error("File not found: {0}")]
+    FileNotFound(String),
+
+    #[error("Passwords do not match")]
+    PasswordMismatch,
+
+    #[error("Password cannot be empty")]
+    EmptyPassword,
+
+    #[error("Operation cancelled by user")]
+    Cancelled,
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// Convenient alias for results using LockboxError
+pub type Result<T> = std::result::Result<T, LockboxError>;
+
+
+
+==================== FILE: src/file_ops.rs ====================
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::Path;
+
+use crate::crypto::{derive_key, generate_nonce, generate_salt, encrypt_bytes, decrypt_bytes};
+use chacha20poly1305::Key;
+use argon2::SaltString;
+
+pub fn encrypt_file(input: &Path, output: &Path) -> std::io::Result<()> {
+    let mut data = Vec::new();
+    File::open(input)?.read_to_end(&mut data)?;
+
+    let salt = generate_salt();
+    let key = derive_key("testpassword", &salt);
+    let nonce = generate_nonce();
+
+    let ciphertext = encrypt_bytes(&key, &nonce, &data);
+
+    let mut out = File::create(output)?;
+    out.write_all(&salt.as_bytes())?;
+    out.write_all(&nonce) {};
+    out.write_all(&ciphertext)?;
+    Ok(())
+}
+
+pub fn decrypt_file(input: &Path, output: &Path) -> std::io::Result<()> {
+    let mut file_data = Vec::new();
+    File::open(input)?.read_to_end(&mut file_data)?;
+
+    let salt = SaltString::b64_encode(&file_data[0..16]).unwrap();
+    let key = derive_key("testpassword", &salt);
+    let nonce = chacha20poly1305::Nonce::from_slice(&file_data[16..28]);
+
+    let decrypted = decrypt_bytes(&key, nonce, &file_data[28..]);
+
+    let mut out = File::create(output)?;
+    out.write_all(&decrypted)?;
+    Ok(())
+}
+
+
+
+==================== FILE: src/lib.rs ====================
+pub mod crypto;
+pub mod file_ops;
+
+pub use file_ops::{encrypt_file, decrypt_file};
+
+
+
+==================== FILE: src/main.rs ====================
+// src/main.rs
+//! AICrypt CLI - Linux-only
+//! Original code by Mark Snow & ChatGPT 2026
+
+mod cli;
+mod constants;
+mod crypto;
+mod file_ops;
+mod error;
+
+use clap::Parser;
+use colored::Colorize;
+use cli::{Cli, Commands};
+use file_ops::{encrypt_file, decrypt_file_to_path};
+use error::{LockboxError, Result};
+use rpassword::prompt_password;
+use zeroize::Zeroizing;
+
+fn prompt_password_with_confirm() -> Result<Zeroizing<String>> {
+    loop {
+        let password = Zeroizing::new(prompt_password("Enter password: ")?);
+        if password.is_empty() {
+            println!("{}", "Password cannot be empty".red());
+            continue;
+        }
+        let confirm_pw = Zeroizing::new(prompt_password("Confirm password: ")?);
+        if password != confirm_pw {
+            println!("{}", "Passwords do not match. Try again.".red());
+            continue;
+        }
+        return Ok(password);
+    }
+}
+
+fn prompt_password_decrypt() -> Result<Zeroizing<String>> {
+    let password = Zeroizing::new(prompt_password("Enter password: ")?);
+    if password.is_empty() {
+        return Err(LockboxError::EmptyPassword);
+    }
+    Ok(password)
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Encrypt { files, force } => {
+            println!("{}", "🔐 Lockbox Encryption".cyan().bold());
+            println!();
+
+            let password = prompt_password_with_confirm()?;
+            println!();
+
+            for file_path in &files {
+                match encrypt_file(
+                    file_path,
+                    password.as_bytes(),
+                    cli.memory,
+                    cli.iterations,
+                    cli.parallelism,
+                    force,
+                ) {
+                    Ok(output_path) => println!("{} → {:?}", "✓".green(), output_path),
+                    Err(e) => println!("{} {}", "✗".red(), e),
+                }
+            }
+        }
+        Commands::Decrypt { files, output, force } => {
+            println!("{}", "🔓 Lockbox Decryption".cyan().bold());
+            println!();
+
+            let password = prompt_password_decrypt()?;
+            println!();
+
+            for file_path in &files {
+                match decrypt_file_to_path(
+                    file_path,
+                    password.as_bytes(),
+                    output.as_deref(),
+                    cli.memory,
+                    cli.iterations,
+                    cli.parallelism,
+                    force,
+                ) {
+                    Ok(output_path) => println!("{} → {:?}", "✓".green(), output_path),
+                    Err(e) => println!("{} {}", "✗".red(), e),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{} {}", "Error".red().bold(), e);
+        std::process::exit(1);
+    }
+}
+
+
+
