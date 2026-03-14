@@ -1,6 +1,12 @@
-# encrypt_decrypt.sh README
+# rage-helper awesome bash script to make rage app WAY easier to use 
 
-## Overview
+
+
+
+This is an awesome helper for the rage app https://github.com/str4d/rage Instead of using complicated commands, you just make sure rage is in same dir as the .sh file. Here is an example - I rename encrypt_decrypt.sh to rge.sh  THEN the ONLY command you need is ./rge.sh example.txt   where "example.txt" is any file you want to encrypt. That is it, ONE COMMAND! IF the file is not encrypted you will be prompted for a password to encrypt it. IF the file is already encrypted, you will be promped for the password to decrypt the file! As such, the .sh file makes using Rage way easier and user friendly. You do NOT have to specify an output file because this handles everything for you- it encrypts to another file, then deletes the original and renames the encrypted file to the original! So with just one SIMPLE command, the file name, you encrypt or decrypt the file right in place. this makes password mode way easier. 
+
+on cosmic desktop, the sh file opens a dialog box window for you to enter password, that is really neat. 
+
 
 This Bash script provides a simple way to toggle encryption and decryption of files "in place" using the `rage` tool (a Rust implementation of the Age encryption format). It overwrites the original file, making it appear as if the encryption/decryption happens directly on the file without creating copies.
 
