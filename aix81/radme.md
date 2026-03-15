@@ -1,0 +1,1 @@
+this takes one file name. it encrypts a.txt to a.ai for example. when decrypting it reverses it/. 
