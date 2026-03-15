@@ -21,6 +21,8 @@ libsodium-rs = "0.2"
 argon2 = "0.5"
 rpassword = "7.3"
 anyhow = "1.0"
+zeroize = "1.7"
 
 [dev-dependencies]
 tempdir = "0.3"
+rand = "0.8"
