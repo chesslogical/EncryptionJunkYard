@@ -1,0 +1,3 @@
+Use cargo run --bin aix8 (for development/debug mode).
+
+Or, for a production-optimized build: cargo build --release, then ./target/release/aix8 <file> (replacing <file> with your target file).
